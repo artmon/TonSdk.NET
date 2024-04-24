@@ -1,9 +1,11 @@
 ﻿using Org.BouncyCastle.Crypto.Digests;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
+using TonSdk.Client.Stack;
 using TonSdk.Core;
 using TonSdk.Core.Boc;
 
@@ -70,15 +72,43 @@ namespace TonSdk.Client
             }
             Cell domainCell = sliceBuilder.Build();
             BigInteger categoryBigInt = CategoryToBigInt(category);
+            
+            var stackItems = new List<IStackItem>()
+            {
+                new VmStackSlice()
+                {
+                    Value = domainCell.Parse()
+                },
+                new VmStackInt()
+                {
+                    Value = categoryBigInt
+                }
+            };
+            var runGetMethodResult = await client.RunGetMethod(dnsAddress, "dnsresolve", stackItems.ToArray());
+            
+            if(runGetMethodResult == null) throw new Exception("Cannot retrieve DNS resolve data.");
+            if (runGetMethodResult.Value.ExitCode != 0 && runGetMethodResult.Value.ExitCode != 1) throw new Exception("Cannot retrieve DNS resolve data.");
 
-            string[][] stack = new string[2][] { Transformers.PackRequestStack(domainCell.Parse()), Transformers.PackRequestStack(categoryBigInt) };
-            RunGetMethodResult runGetMethodResult = await client.RunGetMethod(dnsAddress, "dnsresolve", stack);
+            if (client.GetClientType() == TonClientType.HTTP_TONCENTERAPIV2 && runGetMethodResult.Value.Stack.Length != 2 || client.GetClientType() == TonClientType.LITECLIENT &&
+                runGetMethodResult.Value.StackItems.Length != 2)
+                throw new Exception("Invalid dnsresolve response.");
 
-            if (runGetMethodResult.ExitCode != 0 && runGetMethodResult.ExitCode != 1) throw new Exception("Cannot retrieve DNS resolve data.");
-            if (runGetMethodResult.Stack.Length != 2) throw new Exception("Invalid dnsresolve response.");
+            BigInteger lenBig = BigInteger.Zero;
+            if (client.GetClientType() == TonClientType.HTTP_TONCENTERAPIV2)
+                lenBig = (BigInteger)runGetMethodResult.Value.Stack[0];
+            else
+            {
+                if (runGetMethodResult.Value.StackItems[0] is VmStackInt)
+                    lenBig = ((VmStackInt)runGetMethodResult.Value.StackItems[0]).Value;
+                else if (runGetMethodResult.Value.StackItems[0] is VmStackTinyInt)
+                    lenBig = ((VmStackTinyInt)runGetMethodResult.Value.StackItems[0]).Value;
+            }
 
-            uint resultLen = (uint)(BigInteger)runGetMethodResult.Stack[0];
-            Cell cell = (Cell)runGetMethodResult.Stack[1];
+            if (lenBig < 0) lenBig *= -1;
+            uint resultLen = (uint)lenBig;
+            
+            Cell cell = client.GetClientType() == TonClientType.HTTP_TONCENTERAPIV2 
+                ? (Cell)runGetMethodResult.Value.Stack[1] : ((VmStackCell)runGetMethodResult.Value.StackItems[1]).Value;
 
             if (cell == null || cell.Bits == null) throw new Exception("Invalid dnsresolve response.");
             if (resultLen == 0) return null;
