@@ -7,16 +7,18 @@ using TonSdk.Core.Boc;
 
 namespace TonSdk.Client
 {
-    public class TonClient
+    public class TonClient : ITonClient, IDisposable
     {
-        private TonClientType _type;
-        private HttpApi _httpApi;
-        private LiteClientApi _liteClientApi;
+        private readonly TonClientType _type;
+        private readonly HttpApi _httpApi;
+        private readonly HttpApiV3 _httpApiV3;
+        private readonly HttpWhales _httpWhales;
+        private readonly LiteClientApi _liteClientApi;
         
-        public Jetton Jetton { get; private set; }
-        public Nft Nft { get; private set; }
-        public Wallet Wallet { get; private set; }
-        public Dns Dns { get; private set; }
+        public Jetton Jetton { get; }
+        public Nft Nft { get; }
+        public Wallet Wallet { get; }
+        public Dns Dns { get; }
         
         public TonClient(TonClientType clientType, ITonClientOptions options)
         {
@@ -33,6 +35,22 @@ namespace TonSdk.Client
                         throw new Exception("Wrong provided options for HTTP Client type, use HttpParameters instead.");
                     var opts = (HttpParameters)options;
                     _httpApi = new HttpApi(opts);
+                    break;
+                }
+                case TonClientType.HTTP_TONCENTERAPIV3:
+                {
+                    if (!(options is HttpParameters)) 
+                        throw new Exception("Wrong provided options for HTTP Client type, use HttpParameters instead.");
+                    var opts = (HttpParameters)options;
+                    _httpApiV3 = new HttpApiV3(opts);
+                    break;
+                }
+                case TonClientType.HTTP_TONWHALESAPI:
+                {
+                    if (!(options is HttpParameters)) 
+                        throw new Exception("Wrong provided options for HTTP Client type, use HttpParameters instead.");
+                    var opts = (HttpParameters)options;
+                    _httpWhales = new HttpWhales(opts);
                     break;
                 }
                 case TonClientType.LITECLIENT:
@@ -55,33 +73,38 @@ namespace TonSdk.Client
         /// Retrieves the balance of the specified address.
         /// </summary>
         /// <param name="address">The address to retrieve the balance for.</param>
+        /// <param name="block">Can be placed to fetch in specific block, requires LiteClient (optional).</param>
         /// <returns>The task result contains the balance as a Coins instance.</returns>
-        public async Task<Coins> GetBalance(Address address)
+        public async Task<Coins> GetBalance(Address address, BlockIdExtended? block = null)
         {
-            return (await GetAddressInformation(address))?.Balance;
+            return (await GetAddressInformation(address, block))?.Balance;
         }
 
         /// <summary>
         /// Checks if a contract is deployed at the specified address.
         /// </summary>
         /// <param name="address">The address to check.</param>
+        /// <param name="block">Can be placed to fetch in specific block, requires LiteClient (optional).</param>
         /// <returns>The task result indicates whether a contract is deployed (true) or not (false) at the specified address.</returns>
-        public async Task<bool> IsContractDeployed(Address address)
+        public async Task<bool> IsContractDeployed(Address address, BlockIdExtended? block = null)
         {
-            return (await GetAddressInformation(address))?.State == AccountState.Active;
+            return (await GetAddressInformation(address, block))?.State == AccountState.Active;
         }
 
         /// <summary>
         /// Retrieves the address information for the specified address.
         /// </summary>
         /// <param name="address">The address object to retrieve information for.</param>
+        /// <param name="block">Can be placed to fetch in specific block, requires LiteClient (optional).</param>
         /// <returns>An object containing the address information.</returns>
-        public async Task<AddressInformationResult?> GetAddressInformation(Address address)
+        public async Task<AddressInformationResult?> GetAddressInformation(Address address, BlockIdExtended? block = null)
         {
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetAddressInformation(address),
-                TonClientType.LITECLIENT => await _liteClientApi.GetAddressInformation(address),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.GetAddressInformation(address),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.GetAddressInformation(address),
+                TonClientType.LITECLIENT => await _liteClientApi.GetAddressInformation(address, block),
                 _ => null
             };
         }
@@ -90,13 +113,16 @@ namespace TonSdk.Client
         /// Retrieves the wallet information for the specified address.
         /// </summary>
         /// <param name="address">The address object to retrieve information for.</param>
+        /// <param name="block">Can be placed to fetch in specific block, requires LiteClient (optional).</param>
         /// <returns>An object containing the wallet information.</returns>
-        public async Task<WalletInformationResult?> GetWalletInformation(Address address)
+        public async Task<WalletInformationResult?> GetWalletInformation(Address address, BlockIdExtended? block = null)
         {
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetWalletInformation(address),
-                TonClientType.LITECLIENT => await _liteClientApi.GetWalletInformation(address),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.GetWalletInformation(address),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.GetWalletInformation(address),
+                TonClientType.LITECLIENT => await _liteClientApi.GetWalletInformation(address, block),
                 _ => null
             };
         }
@@ -110,7 +136,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetMasterchainInfo(),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.GetMasterchainInfo(),
                 TonClientType.LITECLIENT => await _liteClientApi.GetMasterchainInfo(),
+                TonClientType.HTTP_TONWHALESAPI => throw new Exception("Method not supported by HTTP_TONWHALESAPI client."),
                 _ => null
             };
         }
@@ -127,7 +155,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.LookUpBlock(workchain, shard, seqno, lt, unixTime),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.LookUpBlock(workchain, shard, seqno, lt, unixTime),
                 TonClientType.LITECLIENT => await _liteClientApi.LookUpBlock(workchain, shard, seqno, lt, unixTime),
+                TonClientType.HTTP_TONWHALESAPI => throw new Exception("Method not supported by HTTP_TONWHALESAPI client."),
                 _ => null
             };
         }
@@ -145,7 +175,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetBlockHeader(workchain, shard, seqno, rootHash, fileHash),
+                TonClientType.HTTP_TONCENTERAPIV3 => throw new Exception("Method not supported by HTTP_TONCENTERAPIV3 client."),
                 TonClientType.LITECLIENT => throw new Exception("Method not supported yet."),
+                TonClientType.HTTP_TONWHALESAPI => throw new Exception("Method not supported by HTTP_TONWHALESAPI client."),
                 _ => null
             };
         }
@@ -175,7 +207,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetBlockTransactions(workchain, shard, seqno, rootHash, fileHash, afterLt, afterHash, count),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.GetBlockTransactions(workchain, shard, seqno, rootHash, fileHash, afterLt, afterHash, count),
                 TonClientType.LITECLIENT => await _liteClientApi.GetBlockTransactions(workchain, shard, seqno, rootHash, fileHash, afterLt, afterHash, count),
+                TonClientType.HTTP_TONWHALESAPI => throw new Exception("Method not supported by HTTP_TONWHALESAPI client."),
                 _ => null
             };
         }
@@ -199,23 +233,34 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetTransactions(address, limit, lt, hash, to_lt, archival),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.GetTransactions(address, limit, lt, hash, to_lt, archival),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.GetTransactions(address, limit, lt, hash, to_lt, archival),
                 TonClientType.LITECLIENT => await _liteClientApi.GetTransactions(address, limit, (long)lt, hash),
                 _ => null
             };
         }
-        
+
         /// <summary>
         /// Executes a specific method on the specified address.
         /// </summary>
         /// <param name="address">The address object to execute the method on.</param>
         /// <param name="method">The name of the method to execute.</param>
         /// <param name="stackItems">The stack parameters for the method (optional).</param>
+        /// <param name="block">Can be placed to fetch in specific block, requeres LiteClient (optional).</param>
         /// <returns>The result of the executed method.</returns>
-        public async Task<RunGetMethodResult?> RunGetMethod(Address address, string method, IStackItem[] stackItems)
+        public async Task<RunGetMethodResult?> RunGetMethod(Address address, string method, IStackItem[] stackItems,
+            BlockIdExtended? block = null)
         {
-            if (_type == TonClientType.HTTP_TONCENTERAPIV2)
-                return await _httpApi.RunGetMethod(address, method, StackUtils.PackInString(stackItems));
-            return await _liteClientApi.RunGetMethod(address, method, stackItems);
+            return _type switch
+            {
+                TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.RunGetMethod(address, method,
+                    StackUtils.PackInString(stackItems)),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.RunGetMethod(address, method,
+                    StackUtils.PackInStringV3(stackItems)),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.RunGetMethod(address, method,
+                    StackUtils.PackInString(stackItems)),
+                _ => await _liteClientApi.RunGetMethod(address, method, stackItems, block)
+            };
         }
         
         /// <summary>
@@ -227,7 +272,7 @@ namespace TonSdk.Client
         /// <returns>The result of the executed method.</returns>
         public async Task<RunGetMethodResult?> RunGetMethod(Address address, string method, string[][] stack)
         {
-            if (_type != TonClientType.HTTP_TONCENTERAPIV2)
+            if (_type != TonClientType.HTTP_TONCENTERAPIV2 || _type != TonClientType.HTTP_TONWHALESAPI)
                 throw new ArgumentException("string[][] stack, must be defined with HTTP_TONCENTERAPIV2 type.");
             return await _httpApi.RunGetMethod(address, method, stack);
         }
@@ -242,7 +287,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.SendBoc(boc),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.SendBoc(boc),
                 TonClientType.LITECLIENT => await _liteClientApi.SendBoc(boc),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.SendBoc(boc),
                 _ => null
             };
         } 
@@ -258,6 +305,8 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.GetConfigParam(configId, seqno),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.GetConfigParam(configId, seqno),
+                TonClientType.HTTP_TONCENTERAPIV3 => throw new Exception("Method not supported by HTTP_TONCENTERAPIV3 client."),
                 TonClientType.LITECLIENT => await _liteClientApi.GetConfigParam(configId),
                 _ => null
             };
@@ -273,7 +322,9 @@ namespace TonSdk.Client
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.Shards(seqno),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.Shards(seqno),
                 TonClientType.LITECLIENT => await _liteClientApi.GetShards(seqno),
+                TonClientType.HTTP_TONWHALESAPI => throw new Exception("Method not supported by HTTP_TONCENTERAPIV3 client."),
                 _ => null
             };
         }
@@ -283,14 +334,24 @@ namespace TonSdk.Client
         /// </summary>
         /// <param name="message">The message for which you need to calculate the fees</param>
         /// <returns>The result of estimation fees.</returns>
-        public async Task<EstimateFeeResult?> EstimateFee(MessageX message, bool ignoreChksig = true)
+        public async Task<IEstimateFeeResult?> EstimateFee(MessageX message, bool ignoreChksig = true)
         {
             return _type switch
             {
                 TonClientType.HTTP_TONCENTERAPIV2 => await _httpApi.EstimateFee(message, ignoreChksig),
+                TonClientType.HTTP_TONCENTERAPIV3 => await _httpApiV3.EstimateFee(message, ignoreChksig),
+                TonClientType.HTTP_TONWHALESAPI => await _httpWhales.EstimateFee(message, ignoreChksig),
                 TonClientType.LITECLIENT => throw new Exception("Method cannot be called with LiteClient. Use other client type instead."),
                 _ => null
             };
+        }
+
+        public void Dispose()
+        {
+            _httpApi?.Dispose();
+            _httpApiV3?.Dispose();
+            _httpWhales?.Dispose();
+            _liteClientApi?.Dispose();
         }
     }
 }

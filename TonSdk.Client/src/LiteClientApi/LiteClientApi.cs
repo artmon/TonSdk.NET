@@ -14,9 +14,9 @@ using TonSdk.Core.Crypto;
 
 namespace TonSdk.Client
 {
-    internal class LiteClientApi
+    internal class LiteClientApi : IDisposable
     {
-        private LiteClient _liteClient;
+        private readonly LiteClient _liteClient;
         
         internal LiteClientApi(string host, int port, string pubKey)
         {
@@ -28,7 +28,16 @@ namespace TonSdk.Client
             await _liteClient.Connect();
         }
 
-        internal async Task<WalletInformationResult> GetWalletInformation(Address address)
+        private Adnl.LiteClient.BlockIdExtended ConvertBlockIdToAdnlBase(BlockIdExtended block)
+        {
+            return new Adnl.LiteClient.BlockIdExtended(
+                block.Workchain, 
+                Convert.FromBase64String(block.RootHash),
+                Convert.FromBase64String(block.FileHash),
+                block.Shard, (int)block.Seqno);
+        }
+
+        internal async Task<WalletInformationResult> GetWalletInformation(Address address, BlockIdExtended? block = null)
         {
             await Init();
             
@@ -38,7 +47,7 @@ namespace TonSdk.Client
                 Balance = new Coins(0)
             };
 
-            var addressInformation = await GetAddressInformation(address);
+            var addressInformation = await GetAddressInformation(address, block);
             result.State = addressInformation.State;
             
             if (addressInformation.State == AccountState.Uninit || addressInformation.State == AccountState.NonExist) 
@@ -57,12 +66,80 @@ namespace TonSdk.Client
             }
             return result;
         }
-        internal async Task<AddressInformationResult> GetAddressInformation(Address address)
+        internal async Task<AddressInformationResult> GetAddressInformation(Address address, BlockIdExtended? block = null)
         {
-            AddressInformationResult result = new AddressInformationResult();
+            var result = new AddressInformationResult();
             await Init();
-            byte[] accountStateBytes = await _liteClient.GetAccountState(address);
+            var res = await _liteClient.GetAccountState(address, block == null ? null : ConvertBlockIdToAdnlBase(block));
             
+            /*
+            var cells = BagOfCells.DeserializeBoc(new Bits(res.Proof));
+
+            var cs = cells[1].Parse().LoadRef().Parse();
+            
+            if (cs.LoadUInt(32) != 0x9023afe2) {
+                throw new Exception("Invalid data");
+            }
+
+            int globalId = (int)cs.LoadInt(32);
+            if ((uint)cs.LoadUInt(2) != 0) {
+                throw new Exception("Invalid data");
+            }
+
+            var shardPrefixBits = cs.LoadUInt(6);
+            var workchainId = cs.LoadInt(32);
+            var shardPrefix = cs.LoadUInt(64);
+
+            var seqno = cs.LoadUInt(32);
+            var vertSeno = cs.LoadUInt(32);
+            var genUTime = cs.LoadUInt(32);
+            
+            var genLt = cs.LoadUInt(64);
+            var minRefMcSeqno = cs.LoadUInt(32);
+            
+            cs.LoadRef();
+            Console.WriteLine(cs.RestoreRemainder().ToString("hex"));
+            bool beforeSplit = cs.LoadBit();
+            
+            var shardAccountsRef = cs.LoadRef();
+            
+            
+            if (!shardAccountsRef.IsExotic) 
+            {
+                var saOptions = new HashmapOptions<BigInteger, CellSlice>()
+                {
+                    KeySize = 256,
+                    Serializers = new HashmapSerializers<BigInteger, CellSlice>
+                    {
+                        Key = k => new BitsBuilder(256).StoreUInt(k, 256).Build(),
+                        Value = v => new CellBuilder().Build()
+                    },
+                    Deserializers = new HashmapDeserializers<BigInteger, CellSlice>
+                    {
+                        Key = k => k.Parse().LoadUInt(256),
+                        Value = v => v.Parse()
+                    }
+                };
+
+
+                
+                //var ss = shardAccounts.LoadRef().Parse();
+                //ss.LoadBit();
+                
+                Console.WriteLine(Utils.BytesToHex(shardAccountsRef.Parse().Refs[0].Bits.ToBytes()));
+                Console.WriteLine(Utils.BytesToHex(shardAccountsRef.Parse().Refs[1].Bits.ToBytes()));
+
+                //Console.WriteLine(ss.LoadUInt(64));
+                //Console.WriteLine(ss.RemainderBits);
+                
+            }
+            
+            return default;
+            var shardState = cells[0].Parse().Refs[0].Parse().LoadRef().Parse().LoadRef().Parse();
+            
+            */
+            
+            byte[] accountStateBytes = res.State;
             if (accountStateBytes.Length == 0)
             {
                 result.State = AccountState.Uninit;
@@ -192,13 +269,13 @@ namespace TonSdk.Client
             }
             else transactionId = null;
             
-            ListBlockTransactionsResult blockTransactions = await _liteClient.ListBlockTransactions(blockId, count, transactionId);
+            var blockTransactions = await _liteClient.ListBlockTransactions(blockId, count, transactionId);
 
             result.Transactions = blockTransactions.TransactionIds.Select(tx => 
                 new ShortTransactionsResult()
                 {
                     Account = new Address(workchain, tx.Account).ToString(),
-                    Hash = Convert.ToBase64String(tx.Hash).ToLower(),
+                    Hash = Convert.ToBase64String(tx.Hash),
                     Lt = (ulong)tx.Lt
                 }).ToArray();
             result.Incomplete = blockTransactions.InComplete;
@@ -209,124 +286,125 @@ namespace TonSdk.Client
 
         internal async Task<TransactionsInformationResult[]> GetTransactions(Address address, uint limit, long lt, string hash)
         {
-            var result = new List<TransactionsInformationResult>();
-            await Init();
-            
-            byte[] transactions = await _liteClient.GetTransactions(limit, address, lt, hash);
-            
-            if (transactions.Length == 0) 
-                return result.ToArray();
-            
-            // public long Utime;
-            // public Cell Data;
-            // public TransactionId TransactionId;
-            // public Coins Fee;
-            // public Coins StorageFee;
-            // public Coins OtherFee;
-            // public RawMessage InMsg;
-            // public RawMessage[] OutMsgs;
-
-            // Console.WriteLine(new Bits(transactions).ToString("base64"));
-            Cell[] cells = BagOfCells.DeserializeBoc(new Bits(transactions));
-            
-            foreach (var cell in cells)
+            try
             {
-                var tx = new TransactionsInformationResult();
-                
-                var slice = cell.Parse();
-                
-                slice.LoadBits(4);
-                slice.LoadBytes(32);
-                tx.TransactionId.Lt = (ulong)slice.LoadUInt(64);
-                
-                slice.LoadBytes(32);
-                slice.LoadUInt(64);
-                
-                uint outMsgCount = (uint)slice.LoadUInt(15);
-                slice.LoadBits(2);
-                slice.LoadBits(2);
+                var result = new List<TransactionsInformationResult>();
+                await Init();
 
-                var firstRefSlice = slice.LoadRef().Parse();
-                var isMsgRef = firstRefSlice.LoadBit();
-                if (isMsgRef)
-                {
-                    var inMsg = firstRefSlice.LoadRef().Parse();
-                    var msgx = MessageX.Parse(inMsg);
+                byte[] transactions = await _liteClient.GetTransactions(limit, address, lt, hash);
 
-                    var cmnMsgInfo = msgx.Data.Info.Cell.Parse();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    tx.InMsg.Source = cmnMsgInfo.LoadAddress();
-                    tx.InMsg.Destination = cmnMsgInfo.LoadAddress();
-                    if (cmnMsgInfo.RemainderBits != 2)
-                    {
-                        tx.InMsg.Value = cmnMsgInfo.LoadCoins() ?? new Coins(0);
-                        if (cmnMsgInfo.LoadBit())
-                            cmnMsgInfo.LoadRef();
-                        tx.InMsg.IhrFee = cmnMsgInfo.LoadCoins() ?? new Coins(0);
-                        tx.InMsg.FwdFee = cmnMsgInfo.LoadCoins() ?? new Coins(0);
-                        tx.InMsg.CreaterLt = (long)cmnMsgInfo.LoadUInt(64);
-                    }
-                }
+                if (transactions.Length == 0)
+                    return result.ToArray();
                 
-                var hmOptions = new HashmapOptions<uint, CellSlice>()
+                var cells = BagOfCells.DeserializeBoc(new Bits(transactions));
+                foreach (var cell in cells)
                 {
-                    KeySize = 15,
-                    Serializers = new HashmapSerializers<uint, CellSlice>
+                    var tx = new TransactionsInformationResult();
+                    var slice = cell.Parse();
+                    slice.LoadBits(4);
+                    slice.LoadBytes(32);
+                    tx.TransactionId.Lt = (ulong)slice.LoadUInt(64);
+                    slice.LoadBytes(32);
+                    slice.LoadUInt(64);
+
+                    slice.LoadUInt(15);
+                    slice.LoadBits(2);
+                    slice.LoadBits(2);
+
+                    var firstRefSlice = slice.LoadRef().Parse();
+                    var inMsg = firstRefSlice.LoadOptRef();
+                    if (inMsg != null)
                     {
-                        Key = k => new BitsBuilder(15).StoreUInt(k, 15).Build(),
-                        Value = v => new CellBuilder().Build()
-                    },
-                    Deserializers = new HashmapDeserializers<uint, CellSlice>
-                    {
-                        Key = k => (uint)k.Parse().LoadUInt(15),
-                        Value = v => v.Parse()
+                        var msgx = MessageX.Parse(inMsg.Parse());
+                        var cmnMsgInfo = msgx.Data.Info.Cell.Parse();
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        tx.InMsg.MsgData.InitState = msgx.Data.StateInit == null ? "" : msgx.Data.StateInit.Cell.ToString("base64");
+                        tx.InMsg.MsgData.Body = msgx.Data.Body;
+                        tx.InMsg.Source = cmnMsgInfo.LoadAddress();
+                        tx.InMsg.Destination = cmnMsgInfo.LoadAddress();
+                        if (cmnMsgInfo.RemainderBits != 2)
+                        {
+                            tx.InMsg.Value = cmnMsgInfo.LoadCoins() ?? new Coins(0);
+                            if (cmnMsgInfo.LoadBit())
+                                cmnMsgInfo.LoadRef();
+                            tx.InMsg.IhrFee = cmnMsgInfo.LoadCoins() ?? new Coins(0);
+                            tx.InMsg.FwdFee = cmnMsgInfo.LoadCoins() ?? new Coins(0);
+                            tx.InMsg.CreatedLt = (ulong)cmnMsgInfo.LoadUInt(64);
+                        }
                     }
-                };
-                
-                var outMsgsMap = firstRefSlice.LoadDict(hmOptions);
-                var msgsList = new List<RawMessage>();
-                for (uint i = 0; i < outMsgsMap.Count; i++)
-                {
-                    var rawMessage = new RawMessage();
-                    var msg = outMsgsMap.Get(i);
-                    var outMsgX = MessageX.Parse(msg.LoadRef().Parse());
-                    var cmnMsgInfo = outMsgX.Data.Info.Cell.Parse();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    cmnMsgInfo.LoadBit();
-                    rawMessage.Source = cmnMsgInfo.LoadAddress();
-                    rawMessage.Destination = cmnMsgInfo.LoadAddress();
-                    if (cmnMsgInfo.RemainderBits != 2)
+                    var hmOptions = new HashmapOptions<uint, CellSlice>()
                     {
-                        rawMessage.Value = cmnMsgInfo.LoadCoins();
-                        if (cmnMsgInfo.LoadBit())
-                            cmnMsgInfo.LoadRef();
-                        rawMessage.IhrFee = cmnMsgInfo.LoadCoins();
-                        rawMessage.FwdFee = cmnMsgInfo.LoadCoins();
-                        rawMessage.CreaterLt = (long)cmnMsgInfo.LoadUInt(64);
+                        KeySize = 15,
+                        Serializers = new HashmapSerializers<uint, CellSlice>
+                        {
+                            Key = k => new BitsBuilder(15).StoreUInt(k, 15).Build(),
+                            Value = v => new CellBuilder().Build()
+                        },
+                        Deserializers = new HashmapDeserializers<uint, CellSlice>
+                        {
+                            Key = k => (uint)k.Parse().LoadUInt(15),
+                            Value = v => v.Parse()
+                        }
+                    };
+
+                    var outMsgsMap = firstRefSlice.LoadDict(hmOptions);
+                    var msgsList = new List<RawMessage>();
+                    for (uint i = 0; i < outMsgsMap.Count; i++)
+                    {
+                        var rawMessage = new RawMessage();
+                        var msg = outMsgsMap.Get(i);
+                        if(msg == null)
+                            continue;
+                        var outMsgX = MessageX.Parse(msg.LoadRef().Parse());
+                        var cmnMsgInfo = outMsgX.Data.Info.Cell.Parse();
+                        rawMessage.MsgData.InitState = outMsgX.Data.StateInit == null ? "" : outMsgX.Data.StateInit.Cell.ToString("base64");
+                        rawMessage.MsgData.Body = outMsgX.Data.Body;
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        cmnMsgInfo.LoadBit();
+                        rawMessage.Source = cmnMsgInfo.LoadAddress();
+                        rawMessage.Destination = cmnMsgInfo.LoadAddress();
+                        if (cmnMsgInfo.RemainderBits != 2)
+                        {
+                            rawMessage.Value = cmnMsgInfo.LoadCoins();
+                            if (cmnMsgInfo.LoadBit())
+                                cmnMsgInfo.LoadRef();
+                            rawMessage.IhrFee = cmnMsgInfo.LoadCoins();
+                            rawMessage.FwdFee = cmnMsgInfo.LoadCoins();
+                            rawMessage.CreatedLt = (ulong)cmnMsgInfo.LoadUInt(64);
+                        }
+
+                        msgsList.Add(rawMessage);
                     }
-                    msgsList.Add(rawMessage);
+
+                    tx.OutMsgs = msgsList.ToArray();
+                    result.Add(tx);
                 }
-                tx.OutMsgs = msgsList.ToArray();
-                result.Add(tx);
+
+                return result.ToArray();
             }
-            return result.ToArray();
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
         }
 
-        internal async Task<RunGetMethodResult?> RunGetMethod(Address address, string method, IStackItem[] stackItems)
+        internal async Task<RunGetMethodResult?> RunGetMethod(Address address, string method, IStackItem[] stackItems, BlockIdExtended? blockId = null)
         {
             await Init();
             
-            RunGetMethodResult result = new RunGetMethodResult();
+            var result = new RunGetMethodResult();
             byte[] stackBytes = BagOfCells.SerializeBoc(StackUtils.SerializeStack(stackItems)).ToBytes();
-            RunSmcMethodResult smcResult = await _liteClient.RunSmcMethod(address, method, stackBytes, new RunSmcOptions() { Result = true });
+            var smcResult = await _liteClient.RunSmcMethod(address, method, stackBytes, new RunSmcOptions() { Result = true },
+                blockId == null ? null : ConvertBlockIdToAdnlBase(blockId));
             try
             {
-                IStackItem[] resultStack = StackUtils.DeserializeStack(Convert.ToBase64String(smcResult.Result));
+                var resultStack = StackUtils.DeserializeStack(Convert.ToBase64String(smcResult.Result));
                 result.StackItems = resultStack;
                 result.ExitCode = smcResult.ExitCode;
                 return result;
@@ -343,7 +421,6 @@ namespace TonSdk.Client
             
             var result = new ConfigParamResult();
             byte[] configBytes = (await _liteClient.GetConfigParams(new int[] { configId })).ConfigProof;
-            Console.WriteLine(Convert.ToBase64String(configBytes));
             result.Bytes = Cell.From(new Bits(configBytes));
             return result;
         }
@@ -352,44 +429,51 @@ namespace TonSdk.Client
         {
             await Init();
             var result = new EstimateFeeResult();
-            //await _liteClient.SendMessage(messageX.Cell.Bits.ToBytes());
             return result;
         }
 
         internal async Task<ShardsInformationResult> GetShards(long seqno)
         {
-            await Init();
-
-            var result = new ShardsInformationResult();
-            var block = (await _liteClient.LookUpBlock(-1, -9223372036854775808, seqno)).BlockId;
-            byte[] data = (await _liteClient.GetAllShardsInfo(block));
-            var cells = BagOfCells.DeserializeBoc(new Bits(data));
-
-            foreach (var cell in cells)
+            try
             {
-                var hmOptions = new HashmapOptions<uint, CellSlice>()
-                {
-                    KeySize = 32,
-                    Serializers = new HashmapSerializers<uint, CellSlice>
-                    {
-                        Key = k => new BitsBuilder(32).StoreUInt(k, 32).Build(),
-                        Value = v => new CellBuilder().Build()
-                    },
-                    Deserializers = new HashmapDeserializers<uint, CellSlice>
-                    {
-                        Key = k => (uint)k.Parse().LoadUInt(32),
-                        Value = v => v.Parse()
-                    }
-                };
-                
-                var hashes = cell.Parse().LoadDict(hmOptions);
-                var binTree = hashes.Get(0).LoadRef().Parse();
-                var shards = new List<BlockIdExtended>();
-                LoadBinTreeR(binTree, ref shards);
+                await Init();
+                var result = new ShardsInformationResult();
+                var block = (await _liteClient.LookUpBlock(-1, -9223372036854775808, seqno)).BlockId;
+                byte[] data = (await _liteClient.GetAllShardsInfo(block));
+                var cells = BagOfCells.DeserializeBoc(new Bits(data));
 
-                result.Shards = shards.ToArray();
+                foreach (var cell in cells)
+                {
+                    var hmOptions = new HashmapOptions<uint, CellSlice>()
+                    {
+                        KeySize = 32,
+                        Serializers = new HashmapSerializers<uint, CellSlice>
+                        {
+                            Key = k => new BitsBuilder(32).StoreUInt(k, 32).Build(),
+                            Value = v => new CellBuilder().Build()
+                        },
+                        Deserializers = new HashmapDeserializers<uint, CellSlice>
+                        {
+                            Key = k => (uint)k.Parse().LoadUInt(32),
+                            Value = v => v.Parse()
+                        }
+                    };
+                
+                    var hashes = cell.Parse().LoadDict(hmOptions);
+                    var binTree = hashes.Get(0).LoadRef().Parse();
+                    var shards = new List<BlockIdExtended>();
+                    LoadBinTreeR(binTree, ref shards);
+
+                    result.Shards = shards.ToArray();
+                }
+                return result;
             }
-            return result;
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
+            
         }
         
         private BlockIdExtended LoadShardDescription(CellSlice slice)
@@ -428,6 +512,11 @@ namespace TonSdk.Client
                 LoadBinTreeR(slice.LoadRef().Parse(), ref shards);
                 LoadBinTreeR(slice.LoadRef().Parse(), ref shards);
             }
+        }
+
+        public void Dispose()
+        {
+            _liteClient.Disconnect();
         }
     }
 }
